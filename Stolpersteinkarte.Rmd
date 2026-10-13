@@ -1,0 +1,277 @@
+---
+  title: "Stolpersteinkarte"
+output:
+  pdf_document: default
+html_notebook: default
+html_document:
+  df_print: paged
+author: Jonas Borchert
+---
+
+<br/>
+
+This code aims to use a map of a city and highlight the locations of Stolpersteine (<https://www.stolpersteine.eu/>) in it. It was created for the example of Halle (Saale), however, it's products should be reproducable for other cities aswell. It uses a list of Stolperstein-locations taken from Wikipedia and adds those onto a map of the city.
+
+The code was made for private use in mind. When reproducing on other devices, adaptions to the working directories and so on, will be necessary. This will, however, require little effort.
+
+# Preparation for the code
+
+Setting the working directory, clearing the environment and loading needed packages.
+
+```{r setup}
+knitr::opts_knit$set(root.dir = "C:/users/jonas/Dropbox/Programming/R/Stolpersteinkarte")
+#closeAllConnections()
+rm(list=ls()) # deleting all current variables in the environment
+#install.packages("pacman", repos='http://cran.us.r-project.org') 
+library("pacman")
+p_load( #install and load needed packages
+  htmlwidgets,
+  leaflet,
+  osmdata,
+  rvest,
+  sf,
+  tidyverse,
+  tidygeocoder,
+  webshot2,
+  xml2)
+
+set.seed(123) 
+```
+
+<br/>
+
+# Setting necessary variables
+
+Here, the working directory and a filepath variable is set.
+
+```{r}
+
+# For execution on laptop
+setwd("C:/Users/jonas/Dropbox/Programming/R/Stolpersteinkarte")
+path <- "C:/Users/jonas/Dropbox/Programming/R/Stolpersteinkarte/"
+
+#starttime <- Sys.time()
+
+```
+
+# Importing and Preparing Data
+
+## Preparing City Map
+
+Resources for layouts of the city from the official city website can be found here: (<https://webapp.halle.de/opendata.hal/>). More information can be found here: <https://halle.de/verwaltung-stadtrat/stadtverwaltung/online-angebote/open-data-portal>
+
+However, in this code the map will just be generated using leafnet and OSM. The location data was taken from the bounding boxes of the WSM files on the resource page.
+
+```{r}
+
+# Einbinden in leaflet
+hallemap <- leaflet() %>%
+  addProviderTiles("OpenStreetMap.Mapnik") %>%
+  setView(lng = 11.98085, lat = 51.47420, zoom = 13)
+
+hallemap
+
+```
+
+## Preparing Address list
+
+In here, a list of addresses of Stolpersteine in Halle is imported from a Wikipedia table. While an object that contains additional information to the Stolpersteine is kept in the code, for the map insertion a new object aggregating all addresses and removing additional information is created.
+
+### Importing addresses of Stolpersteine
+
+```{r}
+# Importing table that contains adresses
+stolpersteine <- read_html("https://de.wikipedia.org/wiki/Liste_der_Stolpersteine_in_Halle_(Saale)") %>% 
+  html_element("table") %>% 
+  html_table() %>% 
+    select(1:4) %>% 
+  rename(
+    Anschrift = 1,
+    Verlegedatum = 2,
+    Person = 3,
+    Inschrift = 4)
+```
+
+### Adding Geodata to Addresses
+
+The geodata will be added in two steps. First, simply using the addresses with the package tinygeocoder. However, this won't work for addresses that are at intersections (i.e. "street A corner street B"). To account for that, two approaches will be employed to find the location where the two mentioned streets cross.
+
+#### Simple way using tinygeocoder
+
+```{r}
+# Adapting and Preparing only addresses for map highlighting
+addresses <-
+  stolpersteine %>%
+  select(Anschrift) %>%
+  count(Anschrift, name = "Anzahl") %>%
+  mutate(
+    Anschrift = paste0(
+      Anschrift %>%
+        str_remove("\\(.*$") %>%
+        str_trim(),
+      ", Halle (Saale)")
+  ) %>%
+  geocode(
+    address = Anschrift,
+    method = "osm",
+    lat = lat,
+    long = lon
+  )
+```
+
+#### For intersections
+
+```{r}
+
+# Downloading streetmap of Halle (because of potential api issues)
+halle_streets <-
+  opq("Halle (Saale)") %>%
+  add_osm_feature("highway") %>%
+  osmdata_sf() %>%
+  .$osm_lines
+# Save original coord-reference-system
+crs_orig <- st_crs(halle_streets)  
+# choose a projected CRS (meters) for geometry ops
+  # otherwise it would try to find closest distance using degrees
+crs_proj <- 25833 # meters
+
+## Two approaches for finding intersection points
+updates <- addresses %>%
+  filter(is.na(lat)) %>% 
+  select(-lat, -lon) %>%  
+  mutate(
+    Anschrift_clean = Anschrift %>%
+      str_remove("\\(.*$") %>%
+      str_remove("\\,.*$") %>% 
+      str_squish() %>%
+      str_replace_all("/Ecke", " and ") %>%
+      str_replace_all(" Ecke ", " and ") %>%
+      str_replace_all("/", " and ") %>%
+      str_remove_all("[0-9]") %>% 
+      str_squish()
+  ) %>%
+  separate(
+    Anschrift_clean,
+    into = c("str1", "str2"),
+    sep  = " and ",
+    fill = "right",
+    extra = "merge"
+  ) %>% 
+  rowwise() %>% 
+  mutate(
+      s1 = list(halle_streets %>% filter(name == str1)),
+      s2 = list(halle_streets %>% filter(name == str2)),
+      u1 = list(st_union(s1)),
+      u2 = list(st_union(s2)),
+      ints = list(st_intersection(u1, u2)),
+      pt = {
+        if (length(ints) == 0 || length(ints[[1]]) == 0 || (inherits(ints[[1]], "sf") && nrow(ints[[1]]) == 0)) {
+          # fallback midpoint
+          list(st_centroid(st_nearest_points(u1, u2)))
+          } else {
+            # real intersection centroid
+            list(st_centroid(ints[[1]]))
+          }
+        }
+      ) %>%
+  mutate(
+    lat = st_coordinates(pt)[,2],
+    lon = st_coordinates(pt)[,1]
+  ) %>% 
+  ungroup()
+
+# Joining the missing datapoints
+
+addresses <- addresses %>%
+  left_join(updates, by = "Anschrift", suffix = c("", "_new")) %>%
+  mutate(
+    lat = coalesce(lat, lat_new),
+    lon = coalesce(lon, lon_new)
+  ) %>%
+  select(1:4)
+
+
+
+```
+
+Here, all variables that were created and are not longer needed for the map PNG or additional information on the Stolpersteine will be removed.
+
+```{r}
+
+rm(list = setdiff(ls(), c("path", "addresses", "stolpersteine", "hallemap")))
+
+```
+
+# Plotting
+
+The plots created within the chunks are interactive given the nature of leaflet. However, commented out below them is the code to print out PNGs of Halle
+
+## Plot 1 - Map with marked locations
+
+```{r}
+
+map1 <- hallemap %>%
+  addAwesomeMarkers(
+    data = addresses,
+    lng = ~lon,
+    lat = ~lat,
+    label = ~Anschrift,
+    popup = ~Anzahl
+  ) %>% 
+  fitBounds(
+    lat1 = min(addresses$lat),
+    lat2 = max(addresses$lat),
+    lng1 = min(addresses$lon),
+    lng2 = max(addresses$lon)
+  )
+  
+
+
+
+```
+
+## Plot 2 - Map with auto-grouped marked locations
+
+This map is based on the just created map but adds information on how many Stolpersteine are at each location.
+
+```{r}
+
+map2 <- hallemap %>%
+  addAwesomeMarkers(
+    data = addresses,
+    lng = ~lon,
+    lat = ~lat,
+    label = ~Anschrift,
+    popup = ~Anzahl,
+    clusterOptions = markerClusterOptions()
+  ) %>% 
+  fitBounds(
+    lat1 = min(addresses$lat),
+    lat2 = max(addresses$lat),
+    lng1 = min(addresses$lon),
+    lng2 = max(addresses$lon)
+  )
+
+```
+
+# testing/specific changes/stopping time
+
+```{r}
+
+endtime <- Sys.time()
+
+# Duration
+endtime - starttime
+
+### Testing
+
+temp <- updates %>% 
+  mutate(
+    lon = st_coordinates(pt)[,1],
+    lat = st_coordinates(pt)[,2]
+  )
+
+
+
+
+```
