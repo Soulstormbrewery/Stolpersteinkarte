@@ -124,11 +124,22 @@ addresses <-
 ```{r}
 
 # Downloading streetmap of Halle (because of potential api issues)
-halle_streets <-
-  opq("Halle (Saale)") %>%
-  add_osm_feature("highway") %>%
-  osmdata_sf() %>%
-  .$osm_lines
+
+set_overpass_url("https://overpass.private.coffee/api/interpreter")
+# alternative: "https://overpass.kumi.systems/api/interpreter"
+
+cache <- "halle_streets.rds"
+
+if (file.exists(cache)) {
+  halle_streets <- readRDS(cache)
+} else {
+  halle_streets <- opq(getbb("Halle (Saale)"), timeout = 120) %>%
+    add_osm_feature("highway") %>%
+    add_osm_feature("name") %>% 
+    osmdata_sf() %>%
+    .$osm_lines
+  saveRDS(halle_streets, cache)     
+}
 # Save original coord-reference-system
 crs_orig <- st_crs(halle_streets)  
 # choose a projected CRS (meters) for geometry ops
@@ -194,7 +205,7 @@ addresses <- addresses %>%
 
 ```
 
-Here, all variables that were created and are not longer needed for the map PNG or additional information on the Stolpersteine will be removed.
+Here, all variables that were created and are not longer needed for the map or additional information on the Stolpersteine will be removed.
 
 ```{r}
 
@@ -224,8 +235,8 @@ map1 <- hallemap %>%
     lng1 = min(addresses$lon),
     lng2 = max(addresses$lon)
   )
-  
 
+map1
 
 
 ```
@@ -252,24 +263,26 @@ map2 <- hallemap %>%
     lng2 = max(addresses$lon)
   )
 
+map2
+
 ```
 
 # testing/specific changes/stopping time
 
 ```{r}
 
-endtime <- Sys.time()
-
-# Duration
-endtime - starttime
-
-### Testing
-
-temp <- updates %>% 
-  mutate(
-    lon = st_coordinates(pt)[,1],
-    lat = st_coordinates(pt)[,2]
-  )
+# endtime <- Sys.time()
+# 
+# # Duration
+# endtime - starttime
+# 
+# ### Testing
+# 
+# temp <- updates %>% 
+#   mutate(
+#     lon = st_coordinates(pt)[,1],
+#     lat = st_coordinates(pt)[,2]
+#   )
 
 
 
