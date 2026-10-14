@@ -100,33 +100,57 @@ The geodata will be added in two steps. First, simply using the addresses with t
 
 ```{r}
 # Adapting and Preparing only addresses for map highlighting
-addresses <-
-  stolpersteine %>%
-  select(Anschrift) %>%
-  count(Anschrift, name = "Anzahl") %>%
-  mutate(
-    Anschrift = paste0(
-      Anschrift %>%
-        str_remove("\\(.*$") %>%
-        str_trim(),
-      ", Halle (Saale)")
+addresses <- stolpersteine %>%
+  transmute(
+    Anschrift = paste0(str_trim(str_remove(Anschrift, "\\(.*$")), ", Halle (Saale)")
   ) %>%
+  count(Anschrift, name = "Anzahl") %>%
   geocode(
-    address = Anschrift,
-    method = "osm",
-    lat = lat,
+    address = Anschrift, 
+    method = "osm", 
+    lat = lat, 
     long = lon
-  )
+    )
 ```
 
 #### For intersections
 
 ```{r}
 
+# Vorbereiten der anzufragenden Straßen
+updates <- addresses %>%
+  filter(is.na(lat)) %>%
+  select(-lat, -lon) %>%
+  mutate(
+    Anschrift_clean = Anschrift %>%
+      str_remove("\\(.*$") %>%
+      str_remove("\\,.*$") %>%
+      str_squish() %>%
+      str_replace_all("/Ecke", " and ") %>%
+      str_replace_all(" Ecke ", " and ") %>%
+      str_replace_all("/", " and ") %>%
+      str_remove_all("[0-9]") %>%
+      str_squish()
+  ) %>%
+  separate(Anschrift_clean, into = c("str1", "str2"),
+           sep = " and ", fill = "right", extra = "merge")
+
+# Nur die nötigen Straßen sollen runtergeladen werden
+street_names <- updates %>%
+  select(str1, str2) %>%
+  unlist() %>%
+  na.omit() %>%
+  unique()
+
+
 # Downloading streetmap of Halle (because of potential api issues)
 
-set_overpass_url("https://overpass.private.coffee/api/interpreter")
-# alternative: "https://overpass.kumi.systems/api/interpreter"
+# Standard server
+set_overpass_url("https://overpass-api.de/api/interpreter")
+
+# Alternative servers
+  # set_overpass_url("https://overpass.private.coffee/api/interpreter")
+  # set_overpass_url("https://overpass.kumi.systems/api/interpreter")
 
 cache <- "halle_streets.rds"
 
@@ -135,39 +159,15 @@ if (file.exists(cache)) {
 } else {
   halle_streets <- opq(getbb("Halle (Saale)"), timeout = 120) %>%
     add_osm_feature("highway") %>%
-    add_osm_feature("name") %>% 
+    add_osm_feature("name", value = street_names) %>% 
     osmdata_sf() %>%
     .$osm_lines
   saveRDS(halle_streets, cache)     
 }
-# Save original coord-reference-system
-crs_orig <- st_crs(halle_streets)  
-# choose a projected CRS (meters) for geometry ops
-  # otherwise it would try to find closest distance using degrees
-crs_proj <- 25833 # meters
+
 
 ## Two approaches for finding intersection points
-updates <- addresses %>%
-  filter(is.na(lat)) %>% 
-  select(-lat, -lon) %>%  
-  mutate(
-    Anschrift_clean = Anschrift %>%
-      str_remove("\\(.*$") %>%
-      str_remove("\\,.*$") %>% 
-      str_squish() %>%
-      str_replace_all("/Ecke", " and ") %>%
-      str_replace_all(" Ecke ", " and ") %>%
-      str_replace_all("/", " and ") %>%
-      str_remove_all("[0-9]") %>% 
-      str_squish()
-  ) %>%
-  separate(
-    Anschrift_clean,
-    into = c("str1", "str2"),
-    sep  = " and ",
-    fill = "right",
-    extra = "merge"
-  ) %>% 
+updates <- updates %>% 
   rowwise() %>% 
   mutate(
       s1 = list(halle_streets %>% filter(name == str1)),
@@ -243,7 +243,7 @@ map1
 
 ## Plot 2 - Map with auto-grouped marked locations
 
-This map is based on the just created map but adds information on how many Stolpersteine are at each location.
+This map is based on the just created map but groups Stolpersteine based on the zoom.
 
 ```{r}
 
